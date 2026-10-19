@@ -135,6 +135,19 @@ details.cfg[open] > summary::after { content:'▴'; }
 .sub-detail { margin-top: 6px; padding: 8px 10px; background: #f9fafb; border-radius: 6px; }
 .sub-detail-row { display: flex; justify-content: space-between; font-size: 11px; color: #999; padding: 2px 0; }
 .sub-detail-val { color: #666; }
+
+/* 환수 체크 */
+.sub-btn { display:block; width:100%; padding:10px; background:#fff; color:#b91c1c; border:1px solid #fca5a5; border-radius:8px; font-size:13px; font-weight:600; cursor:pointer; margin-top:8px; }
+.sub-btn:hover { background:#fef2f2; }
+#hwansu { display:none; margin-top:24px; border-color:#fecaca; }
+#hwansu .section-title { color:#b91c1c; }
+.hw-note { font-size:11.5px; color:#94a3b8; margin:-6px 0 12px; line-height:1.7; }
+.hw-total td { font-weight:700; border-top:1.5px solid #e5e7eb; }
+.hw-ref td { color:#94a3b8; }
+.hw-neg { color:#dc2626; }
+.hw-list { max-height:420px; overflow:auto; }
+.hw-dl { display:inline-block; margin-top:12px; padding:8px 14px; background:#fff; border:1px solid #d1d5db; border-radius:6px; font-size:12px; cursor:pointer; }
+.hw-dl:hover { background:#f9fafb; }
 </style>
 </head>
 <body>
@@ -227,6 +240,7 @@ details.cfg[open] > summary::after { content:'▴'; }
   </details>
 
   <button class="calc-btn" onclick="calculate()">계산하기</button>
+  <button class="sub-btn" onclick="checkHwansuOnly()">환수만 체크 <span style="font-weight:400;color:#94a3b8;">(파일 1개만 올려도 가능 · 수익 계산과 별개)</span></button>
   <div class="error-msg" id="error-msg"></div>
   <div class="loading" id="loading">계산 중...</div>
 
@@ -315,6 +329,16 @@ details.cfg[open] > summary::after { content:'▴'; }
         </div>
       </div>
     </div>
+  </div>
+
+  <div class="section" id="hwansu">
+    <div class="section-title">↩ 환수 체크 (정산종류 = 환수 · 수익 계산과 별개)</div>
+    <div class="hw-note">정산종류가 '환수'인 행만 모아 금액을 따로 봅니다. 위 수익(A−B)에는 영향을 주지 않습니다.
+      해지·정산관련 제외 같은 집계 규칙을 적용하지 않고 <b>환수 행 전부</b>를 담습니다.</div>
+    <div class="diag-scroll"><table class="diag-table" id="hw-sum"></table></div>
+    <div class="cfg-sub">■ 환수 행 상세</div>
+    <div class="diag-scroll hw-list"><table class="diag-table" id="hw-rows"></table></div>
+    <button class="hw-dl" onclick="downloadHwansu()">📥 환수 내역 엑셀</button>
   </div>
 </div>
 
@@ -880,6 +904,8 @@ function calculate() {
       lastResult = { sky:sky, skb:skb, rental:rental, biz:biz };
       renderDashboard(sky, skb, rental, biz);
       renderDiag(sky, skb, rental, biz);
+      renderHwansu(computeHwansu(BU), computeHwansu(JE));     // 수익과 별개
+      lastHwansu.month = lastDiag.month;
 
       document.getElementById('loading').style.display = 'none';
       document.getElementById('results').style.display = 'block';
@@ -889,6 +915,146 @@ function calculate() {
       console.error(err);
     }
   }, 50);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   환수 체크 — 정산종류 '환수' 행만 별도 집계. 수익 계산과 무관.
+   집계 규칙(해지 제외 · 정산관련 제외 등)을 적용하지 않고 전부 담는다.
+   ══════════════════════════════════════════════════════════════════ */
+var HW_CATS = ['SKYLIFE','SKB','SK매직 렌탈','유선기타','그 외 상부점'];
+var HW_REF  = '그 외 상부점';     // 계산기 대상이 아닌 상부점 — 참고용
+var lastHwansu = null;
+
+function hwansuCategory(r) {
+  var sb = key(r['상부점']);
+  if (sb === key(CONFIG.sky.lineCode) || sb === key(CONFIG.sky.mobCode)) return 'SKYLIFE';
+  if (sb === key(CONFIG.skb.lineCode) || sb === key(CONFIG.skb.mobCode)) return 'SKB';
+  if (sb === key(CONFIG.rental.code)) return 'SK매직 렌탈';
+  if (isExtProduct(r['상품명']) && !isCodeInput(r['상부점'])) return '유선기타';
+  return HW_REF;
+}
+
+function computeHwansu(rows) {
+  var by = {}, list = [];
+  HW_CATS.forEach(function(c){ by[c] = { cnt:0, amt:0, yak:0, dong:0 }; });
+  (rows || []).forEach(function(r) {
+    if (String(r['정산종류']||'').trim() !== '환수') return;
+    var c = hwansuCategory(r), x = by[c];
+    x.cnt++; x.amt += num(r['정산금액']); x.yak += num(r['약정금액']); x.dong += num(r['동판수수료']);
+    list.push({ cat:c, row:r });
+  });
+  list.sort(function(a, b) {
+    var d = HW_CATS.indexOf(a.cat) - HW_CATS.indexOf(b.cat);
+    return d || (num(a.row['정산금액']) - num(b.row['정산금액']));
+  });
+  var tot = { cnt:0, amt:0, yak:0, dong:0 }, tgt = { cnt:0, amt:0, yak:0, dong:0 };
+  HW_CATS.forEach(function(c) {
+    ['cnt','amt','yak','dong'].forEach(function(f) {
+      tot[f] += by[c][f];
+      if (c !== HW_REF) tgt[f] += by[c][f];
+    });
+  });
+  return { by:by, list:list, total:tot, target:tgt };
+}
+
+function renderHwansu(hwBU, hwJE) {
+  lastHwansu = { bu:hwBU, je:hwJE };
+  function m(v){ return '<span class="'+(v<0?'hw-neg':'')+'">'+fmt(v)+'</span>'; }
+  function cells(h, c) {
+    if (!h) return '<td>-</td><td>-</td><td>-</td>';
+    var x = c ? h.by[c] : null;
+    return x ? '<td>'+x.cnt+'</td><td>'+m(x.amt)+'</td><td>'+m(x.yak)+'</td>' : '';
+  }
+  function cellsOf(x){ return '<td>'+x.cnt+'</td><td>'+m(x.amt)+'</td><td>'+m(x.yak)+'</td>'; }
+  var dash = '<td>-</td><td>-</td><td>-</td>';
+
+  var h = '<thead><tr><th>구분</th><th></th>'+
+          '<th>상부정산<br>건수</th><th>상부정산<br>정산금액</th><th>상부정산<br>약정금액</th>'+
+          '<th>전체정산<br>건수</th><th>전체정산<br>정산금액</th><th>전체정산<br>약정금액</th></tr></thead><tbody>';
+  HW_CATS.forEach(function(c) {
+    var ref = c === HW_REF;
+    h += '<tr'+(ref?' class="hw-ref"':'')+'><td><b>'+c+'</b></td><td>'+(ref?'참고':'')+'</td>'+
+         (hwBU ? cells(hwBU, c) : dash) + (hwJE ? cells(hwJE, c) : dash) + '</tr>';
+  });
+  h += '<tr class="hw-total"><td>계산기 대상 합계</td><td style="color:#94a3b8;font-weight:400;">SKY·SKB·매직·유선기타</td>'+
+       (hwBU ? cellsOf(hwBU.target) : dash) + (hwJE ? cellsOf(hwJE.target) : dash) + '</tr>';
+  h += '<tr class="hw-total"><td>파일 전체 합계</td><td></td>'+
+       (hwBU ? cellsOf(hwBU.total) : dash) + (hwJE ? cellsOf(hwJE.total) : dash) + '</tr>';
+  document.getElementById('hw-sum').innerHTML = h + '</tbody>';
+
+  var d = '<thead><tr><th>파일</th><th>구분</th><th>고객명</th><th>상품명</th><th>상부점</th><th>협력점</th>'+
+          '<th>개통상태</th><th>정산금액</th><th>약정금액</th><th>정산 비고</th></tr></thead><tbody>';
+  var any = false;
+  [['상부정산', hwBU], ['전체정산', hwJE]].forEach(function(p) {
+    if (!p[1]) return;
+    p[1].list.forEach(function(it) {
+      any = true; var r = it.row;
+      d += '<tr'+(it.cat===HW_REF?' class="hw-ref"':'')+'><td>'+p[0]+'</td><td>'+it.cat+'</td>'+
+           '<td>'+esc(r['고객명']||'')+'</td><td class="mono">'+esc(r['상품명']||'')+'</td>'+
+           '<td class="mono">'+esc(r['상부점']||'')+'</td><td>'+esc(r['협력점']||'')+'</td>'+
+           '<td>'+esc(r['개통상태']||'')+'</td><td>'+m(num(r['정산금액']))+'</td><td>'+m(num(r['약정금액']))+'</td>'+
+           '<td style="text-align:left;">'+esc(r['정산 비고']||'')+'</td></tr>';
+    });
+  });
+  if (!any) d += '<tr><td colspan="10" style="color:#94a3b8;">환수 행 없음</td></tr>';
+  document.getElementById('hw-rows').innerHTML = d + '</tbody>';
+  document.getElementById('hwansu').style.display = 'block';
+}
+
+/* 파일 1개만 있어도 환수만 따로 체크 */
+function checkHwansuOnly() {
+  hideError();
+  var slots = ['상부정산','전체정산'].filter(function(k2){ return files[k2]; });
+  if (!slots.length) { showError('상부정산 또는 전체정산 파일을 하나 이상 선택해주세요.'); return; }
+  try {
+    var bu = null, je = null, month = '';
+    slots.forEach(function(sl) {
+      var kind = detectKind(files[sl]) || sl;          // 시트명 우선, 없으면 올린 칸 기준
+      var rows = getRows(sl);
+      month = month || detectMonth(rows);
+      var h = computeHwansu(rows);
+      if (kind === '상부정산') bu = h; else je = h;
+    });
+    renderHwansu(bu, je);
+    lastHwansu.month = month;
+    var sec = document.getElementById('hwansu');
+    if (sec.scrollIntoView) sec.scrollIntoView({ behavior:'smooth', block:'start' });
+  } catch(err) {
+    showError('환수 체크 오류: ' + err.message);
+    console.error(err);
+  }
+}
+
+function hwansuSheetRows() {
+  var H = lastHwansu, out = [['환수 체크 (정산종류=환수 · 수익 계산과 별개 · 집계 규칙 미적용)'], [],
+    ['구분','상부정산 건수','상부정산 정산금액','상부정산 약정금액','전체정산 건수','전체정산 정산금액','전체정산 약정금액']];
+  function v(h, x){ return h ? [x.cnt, x.amt, x.yak] : ['-','-','-']; }
+  HW_CATS.forEach(function(c) {
+    out.push([c + (c===HW_REF?' (참고)':'')]
+      .concat(v(H.bu, H.bu ? H.bu.by[c] : 0), v(H.je, H.je ? H.je.by[c] : 0)));
+  });
+  out.push(['계산기 대상 합계'].concat(v(H.bu, H.bu ? H.bu.target : 0), v(H.je, H.je ? H.je.target : 0)));
+  out.push(['파일 전체 합계'].concat(v(H.bu, H.bu ? H.bu.total : 0), v(H.je, H.je ? H.je.total : 0)));
+  out.push([]);
+  out.push(['파일','구분','고객명','상품명','상부점','협력점','개통상태','개통일','정산금액','약정금액','동판수수료','정산 비고']);
+  [['상부정산', H.bu], ['전체정산', H.je]].forEach(function(p) {
+    if (!p[1]) return;
+    p[1].list.forEach(function(it) {
+      var r = it.row;
+      out.push([p[0], it.cat, r['고객명'], r['상품명'], r['상부점'], r['협력점'], r['개통상태'], r['개통일'],
+                num(r['정산금액']), num(r['약정금액']), num(r['동판수수료']), r['정산 비고']]);
+    });
+  });
+  return out;
+}
+
+function downloadHwansu() {
+  if (!lastHwansu) return;
+  var wb = XLSX.utils.book_new();
+  var ws = XLSX.utils.aoa_to_sheet(hwansuSheetRows());
+  ws['!cols'] = [{wch:16},{wch:14},{wch:22},{wch:24},{wch:30},{wch:20},{wch:14},{wch:12},{wch:14},{wch:14},{wch:12},{wch:30}];
+  XLSX.utils.book_append_sheet(wb, ws, '환수');
+  XLSX.writeFile(wb, '환수체크_' + (lastHwansu.month || '') + '.xlsx');
 }
 
 function showError(msg){ var el = document.getElementById('error-msg'); el.style.display='block'; el.textContent = msg; }
@@ -1239,6 +1405,12 @@ function downloadExcel() {
   var ws3 = XLSX.utils.aoa_to_sheet(dRows);
   ws3['!cols'] = [{wch:14},{wch:30},{wch:16},{wch:16},{wch:10},{wch:16},{wch:16},{wch:16}];
   XLSX.utils.book_append_sheet(wb, ws3, '조건체크');
+
+  if (lastHwansu) {
+    var ws4 = XLSX.utils.aoa_to_sheet(hwansuSheetRows());
+    ws4['!cols'] = [{wch:16},{wch:14},{wch:22},{wch:24},{wch:30},{wch:20},{wch:14},{wch:12},{wch:14},{wch:14},{wch:12},{wch:30}];
+    XLSX.utils.book_append_sheet(wb, ws4, '환수');
+  }
 
   XLSX.writeFile(wb, '코드실적보고_' + (D.month || '') + '.xlsx');
 }
